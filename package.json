@@ -36,7 +36,8 @@
         "serve": "esbuild wwwdev/index.ts --bundle --outdir=wwwdev/js --servedir=wwwdev --sourcemap",
         "build": "tsc -p tsconfig.build.json",
         "docs": "typedoc",
-        "prepublishOnly": "npm run build"
+        "prepublishOnly": "npm run build",
+        "prepare": "npm run build"
     },
     "devDependencies": {
         "@eslint/js": "9.18.0",
