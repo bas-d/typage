@@ -7,6 +7,19 @@ on:
 permissions:
   contents: read
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x # Active LTS as of 2025-01
+      - run: npm clean-install
+      - run: npm run build
+      - run: npm run lint
+      - run: npm run test
   build:
     runs-on: ubuntu-latest
     steps:
@@ -18,27 +31,39 @@ jobs:
           node-version: 22.x
       - run: npm clean-install
       - run: npm run build
-      - run: node_modules/.bin/esbuild --target=es2022 --bundle --minify --outfile=typage.js --global-name=age age-encryption
+      - run: node_modules/.bin/esbuild --target=es2022 --bundle --outfile=typage.js --global-name=age age-encryption
+      - run: node_modules/.bin/esbuild --target=es2022 --bundle --minify --outfile=typage.min.js --global-name=age age-encryption
       - uses: actions/upload-artifact@v4
         with:
           name: age-esbuild
-          path: typage.js
+          path: |
+            typage.js
+            typage.min.js
   upload:
     if: github.event_name == 'release'
-    needs: build
+    needs: [build, test]
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: age-esbuild
-      - run: gh release upload -R FiloSottile/typage "$VERSION" "typage.js#age-${VERSION#v}.min.js"
+      - run: |
+          mv typage.js "age-${VERSION#v}.js"
+          mv typage.min.js "age-${VERSION#v}.min.js"
+          gh release upload -R FiloSottile/typage "$VERSION" "age-*.js"
         env:
           VERSION: ${{ github.event.release.tag_name }}
           GH_TOKEN: ${{ github.token }}
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "age-*.js"
   publish:
     if: github.event_name == 'release'
+    needs: upload
     permissions:
       id-token: write
     runs-on: ubuntu-latest

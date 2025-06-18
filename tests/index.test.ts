@@ -1,7 +1,9 @@
 import { describe, it, assert, onTestFinished, expect } from "vitest"
 import { Decrypter, Encrypter, generateIdentity, identityToRecipient } from "../lib/index.js"
-import { forceWebCryptoOff, isX25519Supported } from "../lib/x25519.js"
+import { forceWebCryptoOff, webCryptoFallback } from "../lib/x25519.js"
+import { randomBytesStream, readAll } from "../lib/io.js"
 import { base64nopad } from "@scure/base"
+import { sha256 } from "@noble/hashes/sha256"
 
 describe("AgeDecrypter", function () {
     it("should decrypt a file with the right passphrase", async function () {
@@ -15,6 +17,13 @@ describe("AgeDecrypter", function () {
         d.addIdentity("AGE-SECRET-KEY-1L27NYJDYRNDSCCELNZE8C6JTSH22TLQJVPGD7289KDLMZA5HWN6SZPEHGF")
         const file = base64nopad.decode("YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBOb280UHUyVWZwTllzY3Z5OU1tTjlscHV1Smt4Nng0MEZkdGZoQzd1dVFZCmk0VUNvVmoxbEhHalV0bVR2MHFyRGl0YzNtMXdoY1oyVUtvWDU3MUQwR1EKLS0tIGJ1RTZSYmR6ZlNHSk5tSGl3U2hqR1FFUDF4eEdjSGZtbXlYQUN4SnM4RDAKyqdZXpg65sTtmakjxLONtEgaSwXeS8t+7jAWvlleVEFO4/9QIQ")
         assert.equal(await d.decrypt(file, "text"), "test\n")
+    })
+    it("should decrypt a detached header with the right identity", async function () {
+        const d = new Decrypter()
+        d.addIdentity("AGE-SECRET-KEY-1L27NYJDYRNDSCCELNZE8C6JTSH22TLQJVPGD7289KDLMZA5HWN6SZPEHGF")
+        const file = base64nopad.decode("YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBOb280UHUyVWZwTllzY3Z5OU1tTjlscHV1Smt4Nng0MEZkdGZoQzd1dVFZCmk0VUNvVmoxbEhHalV0bVR2MHFyRGl0YzNtMXdoY1oyVUtvWDU3MUQwR1EKLS0tIGJ1RTZSYmR6ZlNHSk5tSGl3U2hqR1FFUDF4eEdjSGZtbXlYQUN4SnM4RDAK")
+        const expected = base64nopad.decode("QEXcQCDq9Zzp2lj+S7omjA")
+        assert.deepEqual(await d.decryptHeader(file), expected)
     })
 })
 
@@ -72,13 +81,15 @@ describe("AgeEncrypter", function () {
         assert.deepEqual(out, "age")
     })
     it("should encrypt (and decrypt) a file with a CryptoKey", async function (context) {
-        if (!await isX25519Supported()) {
+        const keyPair = await webCryptoFallback(async () => {
+            return await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"])
+        }, () => { return null })
+        if (keyPair === null) {
             context.skip()
             return
         }
-
-        const keyPair = await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"])
-        const identity = (keyPair as CryptoKeyPair).privateKey
+        if (keyPair instanceof CryptoKey) throw new Error("expected a CryptoKeyPair")
+        const identity = keyPair.privateKey
         const recipient = await identityToRecipient(identity)
 
         const e = new Encrypter()
@@ -105,151 +116,34 @@ describe("AgeEncrypter", function () {
 
         assert.deepEqual(out, "age")
     })
-    it("should encrypt a file using TransformStream and decrypt normally", async function () {
-        const e = new Encrypter()
-        e.setScryptWorkFactor(12)
-        e.setPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
-        const file = new Blob([new TextEncoder().encode("age")])
-        const ciphertextStream = await e.encrypt(file.stream())
-        const ciphertextLength = e.getCiphertextSize(file.size)
-        const reader = ciphertextStream.getReader()
-        const ciphertext = new Uint8Array(ciphertextLength)
-        let index = 0
-        while (true) {
-            const { done, value } = await reader.read()
-            if (done) {
-                break
-            }
-            if (value) {
-                ciphertext.set(value.subarray(), index)
-                index += value.length
-            }
-        }
-        const d = new Decrypter()
-        d.addPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
-        const out = await d.decrypt(ciphertext, "text")
-        assert.deepEqual(out, "age")
-    })
-    it.for([[65536 * 1], [65536 * 2], [123], [9182391]])("should encrypt a file of size %i using TransformStream and decrypt normally", async function ([size]) {
-        const e = new Encrypter()
-        e.setScryptWorkFactor(12)
-        e.setPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
-        const fileData = new Uint8Array(size).fill(42)
-        const file = new Blob([fileData])
-        const ciphertextStream = await e.encrypt(file.stream())
-        const ciphertextLength = e.getCiphertextSize(file.size)
-        const reader = ciphertextStream.getReader()
-        const ciphertext = new Uint8Array(ciphertextLength)
-        let index = 0
-        while (true) {
-            const { done, value } = await reader.read()
-            if (done) {
-                break
-            }
-            if (value) {
-                ciphertext.set(value.subarray(), index)
-                index += value.length
-            }
-        }
-        const d = new Decrypter()
-        d.addPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
-        const out = await d.decrypt(ciphertext, "uint8array")
-        assert.deepEqual(out, fileData)
-    })
-    it.for([[65536 * 1], [65536 * 2], [123], [9182391]])("should encrypt a file of size %i normally and decrypt using TransformStream", async function ([size]) {
-        const e = new Encrypter()
-        e.setScryptWorkFactor(12)
-        e.setPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
-        const fileData = new Uint8Array(size).fill(42)
-        const file = await e.encrypt(fileData)
-
-        const d = new Decrypter()
-        d.addPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
-        const blob = new Blob([file])
-        const decryptionStream = await d.decrypt(blob.stream())
-        const reader = decryptionStream.getReader()
-        const out = new Uint8Array(fileData.length)
-        let pointer = 0
-        while (true) {
-            const { done, value } = await reader.read()
-            if (done) {
-                break
-            }
-            if (value) {
-                out.set(value, pointer)
-                pointer += value.length
-            }
-        }
-        assert.deepEqual(out, fileData)
-    })
-    it("should encrypt a file normally and decrypt using TransformStream", async function () {
-        const e = new Encrypter()
-        e.setScryptWorkFactor(12)
-        e.setPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
-        const file = await e.encrypt("age")
-
-        const d = new Decrypter()
-        d.addPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
-        const blob = new Blob([file])
-        const decryptionStream = await d.decrypt(blob.stream())
-        const reader = decryptionStream.getReader()
-        let out = ""
-        while (true) {
-            const { done, value } = await reader.read()
-            if (done) {
-                break
-            }
-            if (value) {
-                out += new TextDecoder().decode(value)
-            }
-        }
-        assert.deepEqual(out, "age")
-    })
-    it("should encrypt and decrypt using TransformStream", async function () {
+    it.for([
+        [0, 1], [1, 1],
+        [65536 - 1, 100],
+        [65536 - 1, 128],
+        [65536, 100],
+        [65536, 128],
+        [65536 + 1, 100],
+        [65536 + 1, 128],
+        [65536 * 2 - 1, 100],
+        [65536 * 2 - 1, 128],
+        [65536 * 2, 100],
+        [65536 * 2, 128],
+        [65536 * 2 + 1, 100],
+        [65536 * 2 + 1, 128],
+    ])("should encrypt (and decrypt) a file with ReadableStream", async function ([size, chunk]: number[]) {
         const e = new Encrypter()
         const d = new Decrypter()
         e.setScryptWorkFactor(12)
         e.setPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
         d.addPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
 
-        const file = new Blob([new TextEncoder().encode("age")])
-        const encryptionStream = await e.encrypt(file.stream())
-        const decryptionStream = await d.decrypt(encryptionStream)
-
-        const reader = decryptionStream.getReader()
-        let out = ""
-        while (true) {
-            const { done, value } = await reader.read()
-            if (done) {
-                break
-            }
-            if (value) {
-                out += new TextDecoder().decode(value)
-            }
-        }
-        assert.deepEqual(out, "age")
-    })
-    it("should calculate the correct size of the ciphertext", async function () {
-        const e = new Encrypter()
-        e.setScryptWorkFactor(12)
-        e.setPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
-        const file = new Blob([new TextEncoder().encode("age")])
-        const ciphertextStream = await e.encrypt(file.stream())
-        const ciphertextLength = e.getCiphertextSize(file.size)
-        const reader = ciphertextStream.getReader()
-        const ciphertext = new Uint8Array(ciphertextLength)
-        let index = 0
-        while (true) {
-            const { done, value } = await reader.read()
-            if (done) {
-                break
-            }
-            if (value) {
-                ciphertext.set(value.subarray(), index)
-                index += value.length
-            }
-        }
-        assert.deepEqual(index, ciphertextLength)
+        const source = randomBytesStream(size, chunk)
+        const sourceHash = new HashingTransformStream()
+        const encrypted = await e.encrypt(source.pipeThrough(sourceHash))
+        const decrypted = await d.decrypt(encrypted)
+        const decryptedHash = new HashingTransformStream()
+        await readAll(decrypted.pipeThrough(decryptedHash))
+        assert.deepEqual(sourceHash.digest, decryptedHash.digest)
     })
     it("should throw when using multiple passphrases", function () {
         const e = new Encrypter()
@@ -304,3 +198,19 @@ describe.skipIf(expect.getState().environment !== "node")("esbuild", function ()
         assert.equal(result.outputFiles[0].text, "(() => {\n})();\n")
     })
 })
+
+class HashingTransformStream extends TransformStream<Uint8Array, Uint8Array> {
+    digest: Uint8Array | null = null
+    constructor() {
+        const h = sha256.create()
+        super({
+            transform: (chunk, controller) => {
+                h.update(chunk)
+                controller.enqueue(chunk)
+            },
+            flush: () => {
+                this.digest = h.digest()
+            }
+        })
+    }
+}

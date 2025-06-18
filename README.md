@@ -98,43 +98,26 @@ const out = await d.decrypt(ciphertext, "text")
 console.log(out)
 ```
 
-#### Encrypt and decrypt using Streams API
+#### Encrypt and decrypt using the Streams API
 
-`age-encryption` can also encrypt and decrypt using the [Streams API](https://developer.mozilla.org/en-US/docs/Web/API/Streams_API). This can be useful for encrypting or decrypting large files on the fly during uploading or downloading.
+You can also encrypt and decrypt [ReadableStreams][]. This can be useful for
+encrypting or decrypting large files, requests, or responses on the fly.
 
 ```ts
-import { Encrypter, Decrypter } from 'age-encryption'
+import { Encrypter, Decrypter } from "age-encryption"
+
+const file = new File([new TextEncoder().encode("age")], "age.txt")
 
 const e = new Encrypter()
-const d = new Decrypter()
 e.setScryptWorkFactor(12)
-e.setPassphrase('light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion')
-d.addPassphrase('light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion')
+e.setPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
+const encryptedStream = await e.encrypt(file.stream())
 
-const file = new File([new TextEncoder().encode('age')], 'age.txt')
+const d = new Decrypter()
+d.addPassphrase("light-original-energy-average-wish-blind-vendor-pencil-illness-scorpion")
+const decryptedStream = await d.decrypt(encryptedStream)
 
-// TransformStream for encryption
-const encryptionStream = await e.encrypt(file.stream())
-
-// TransformStream for decryption
-const decryptionStream = await d.decrypt(encryptionStream)
-
-// If you need to know the length of the ciphertext beforehand, you can use getCiphertextSize
-const ciphertextLength = e.getCiphertextSize(file.size)
-console.log(`The final ciphertext size will be ${ciphertextLength}`)
-
-const reader = decryptionStream.getReader()
-let out = ''
-while (true) {
-  const { done, value } = await reader.read()
-  if (done) {
-    break
-  }
-  if (value) {
-    out += new TextDecoder().decode(value)
-  }
-}
-console.log(out) // age
+console.log(await new Response(decryptedStream).text())
 ```
 
 ### Browser usage

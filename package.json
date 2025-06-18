@@ -1,6 +1,6 @@
 {
     "name": "age-encryption",
-    "version": "0.2.1",
+    "version": "0.2.3",
     "files": [
         "dist/"
     ],
@@ -9,9 +9,8 @@
         "url": "git+https://github.com/FiloSottile/typage.git"
     },
     "type": "module",
-    "exports": {
-        ".": "./dist/index.js"
-    },
+    "main": "./dist/index.js",
+    "exports": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "keywords": [
         "age",
@@ -27,10 +26,13 @@
     "scripts": {
         "test": "vitest --run",
         "test:short": "vitest --run --project node",
-        "examples:node": "cd tests/examples && npm update && npm run test:node",
-        "examples:bun": "cd tests/examples && bun update --no-save && bun run test:bun",
-        "examples:deno": "cd tests/examples && npm update && deno task test:deno",
-        "examples:esbuild": "cd tests/examples && npm update && npm run test:esbuild",
+        "test:slow": "SLOW=1 vitest --run --project node",
+        "examples:node": "cd tests/examples && npm install --omit=dev && npm run test:node",
+        "examples:bun": "cd tests/examples && bun install --omit=dev && bun run test:bun",
+        "examples:deno": "cd tests/examples && deno install && deno task test:deno",
+        "examples:yarn": "cd tests/examples && yarn install --prod && yarn test:node",
+        "examples:pnpm": "cd tests/examples && pnpm install --prod && pnpm test:node",
+        "examples:esbuild": "cd tests/examples && npm install && npm run test:esbuild",
         "bench": "vitest bench --run",
         "lint": "eslint .",
         "serve": "esbuild wwwdev/index.ts --bundle --outdir=wwwdev/js --servedir=wwwdev --sourcemap",
@@ -45,7 +47,7 @@
         "@stylistic/eslint-plugin": "2.13.0",
         "@types/node": "22.10.5",
         "@vitest/browser": "2.1.8",
-        "cctv-age": "0.1.1",
+        "cctv-age": "0.1.2",
         "esbuild": "0.24.2",
         "eslint": "9.18.0",
         "eslint-plugin-tsdoc": "0.4.0",

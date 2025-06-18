@@ -4,7 +4,8 @@ import { sha256 } from "@noble/hashes/sha256"
 import { randomBytes } from "@noble/hashes/utils"
 import { ScryptIdentity, ScryptRecipient, X25519Identity, X25519Recipient } from "./recipients.js"
 import { encodeHeader, encodeHeaderNoMAC, parseHeader, Stanza } from "./format.js"
-import { decryptSTREAM, encryptTransformSTREAM, encryptSTREAM, decryptTransformSTREAM, calculateCiphertextLength } from "./stream.js"
+import { decryptSTREAM, encryptSTREAM } from "./stream.js"
+import { readAll, stream, read, readAllString, prepend } from "./io.js"
 
 export * as armor from "./armor.js"
 
@@ -135,33 +136,17 @@ export class Encrypter {
     }
 
     /**
-     * Calculate the size of the ciphertext for a given plaintext size.
-     * 
-     * @param plaintextSize - The size of the file to encrypt.
-     * @returns The size of the ciphertext, including header and nonce
-     */
-    getCiphertextSize(plaintextSize: number): number {
-        if (this.headerSize === null) {
-            throw new Error("header size not set")
-        }
-        return this.headerSize + NONCE_SIZE + calculateCiphertextLength(plaintextSize)
-    }
-
-    /**
      * Encrypt a file using the configured passphrase or recipients.
      *
      * @param file - The file to encrypt. If a string is passed, it will be
      * encoded as UTF-8.
      *
-     * @returns A promise that resolves to the encrypted file as a Uint8Array.
+     * @returns A promise that resolves to the encrypted file as a Uint8Array,
+     * or as a ReadableStream if the input was a stream.
      */
     async encrypt(file: Uint8Array | string): Promise<Uint8Array>
     async encrypt(file: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>>
     async encrypt(file: Uint8Array | string | ReadableStream<Uint8Array>): Promise<Uint8Array | ReadableStream<Uint8Array>> {
-        if (typeof file === "string") {
-            file = new TextEncoder().encode(file)
-        }
-
         const fileKey = randomBytes(16)
         const stanzas: Stanza[] = []
 
@@ -180,23 +165,11 @@ export class Encrypter {
 
         const nonce = randomBytes(NONCE_SIZE)
         const streamKey = hkdf(sha256, fileKey, nonce, "payload", 32)
+        const encrypter = encryptSTREAM(streamKey)
 
-        if (file instanceof ReadableStream) {
-            const out = new Uint8Array(header.length + nonce.length)
-            out.set(header)
-            out.set(nonce, header.length)
-
-            const encryptionStream = encryptTransformSTREAM(streamKey, out)
-            return file.pipeThrough(encryptionStream)
-        } else {
-            const payload = encryptSTREAM(streamKey, file)
-            const out = new Uint8Array(header.length + nonce.length + payload.length)
-            out.set(header)
-            out.set(nonce, header.length)
-            out.set(payload, header.length + nonce.length)
-
-            return out
-        }
+        if (file instanceof ReadableStream) return prepend(file.pipeThrough(encrypter), header, nonce)
+        if (typeof file === "string") file = new TextEncoder().encode(file)
+        return await readAll(prepend(stream(file).pipeThrough(encrypter), header, nonce))
     }
 
 }
@@ -259,45 +232,56 @@ export class Decrypter {
      * @param outputFormat - The format to return the decrypted file in. If
      * `"text"` is passed, the file's plaintext will be decoded as UTF-8 and
      * returned as a string. Optional. It defaults to `"uint8array"`.
+     * Ignored if the input is a stream.
      *
-     * @returns A promise that resolves to the decrypted file.
+     * @returns A promise that resolves to the decrypted file, or to a
+     * ReadableStream of the decrypted file if the input was a stream.
+     * The header is processed before the promise resolves.
      */
     async decrypt(file: Uint8Array, outputFormat?: "uint8array"): Promise<Uint8Array>
-    async decrypt(file: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>>
     async decrypt(file: Uint8Array, outputFormat: "text"): Promise<string>
+    async decrypt(file: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>>
     async decrypt(file: Uint8Array | ReadableStream<Uint8Array>, outputFormat?: "text" | "uint8array"): Promise<string | Uint8Array | ReadableStream<Uint8Array>> {
-        if (file instanceof Uint8Array) {
-            const { key: streamKey, payload } = await this.getStreamKey(file)
-            const out = decryptSTREAM(streamKey, payload)
-            if (outputFormat === "text") return new TextDecoder().decode(out)
-            return out
-        } else {
-            const [headerStream, fileStream] = file.tee()
-            const { value } = await headerStream.getReader().read()
-            if (value === undefined) {
-                throw Error("invalid header data")
-            }
-            const decryptionStream = decryptTransformSTREAM(this.getStreamKey.bind(this))
-            return fileStream.pipeThrough(decryptionStream)
-        }
+        const s = file instanceof ReadableStream ? file : stream(file)
+        const { fileKey, rest } = await this.decryptHeaderInternal(s)
+        const { data: nonce, rest: payload } = await read(rest, 16)
+
+        const streamKey = hkdf(sha256, fileKey, nonce, "payload", 32)
+        const decrypter = decryptSTREAM(streamKey)
+        const out = payload.pipeThrough(decrypter)
+
+        if (file instanceof ReadableStream) return out
+        if (outputFormat === "text") return await readAllString(out)
+        return await readAll(out)
     }
 
-    private async getStreamKey(chunk: Uint8Array): Promise<{ key: Uint8Array, payload: Uint8Array }> {
-        const h = parseHeader(chunk)
+    /**
+     * Decrypt the file key from a detached header. This is a low-level
+     * function that can be used to implement delegated decryption logic.
+     * Most users won't need this.
+     *
+     * It is the caller's responsibility to keep track of what file the
+     * returned file key decrypts, and to ensure the file key is not used
+     * for any other purpose.
+     *
+     * @param header - The file's textual header, including the MAC.
+     *
+     * @returns The file key used to encrypt the file.
+     */
+    async decryptHeader(header: Uint8Array): Promise<Uint8Array> {
+        return (await this.decryptHeaderInternal(stream(header))).fileKey
+    }
+
+    private async decryptHeaderInternal(file: ReadableStream<Uint8Array>): Promise<{ fileKey: Uint8Array, rest: ReadableStream<Uint8Array> }> {
+        const h = await parseHeader(file)
         const fileKey = await this.unwrapFileKey(h.stanzas)
-        if (fileKey === null) {
-            throw Error("no identity matched any of the file's recipients")
-        }
+        if (fileKey === null) throw Error("no identity matched any of the file's recipients")
 
         const hmacKey = hkdf(sha256, fileKey, undefined, "header", 32)
         const mac = hmac(sha256, hmacKey, h.headerNoMAC)
-        if (!compareBytes(h.MAC, mac)) {
-            throw Error("invalid header HMAC")
-        }
+        if (!compareBytes(h.MAC, mac)) throw Error("invalid header HMAC")
 
-        const nonce = h.rest.subarray(0, NONCE_SIZE)
-        const key = hkdf(sha256, fileKey, nonce, "payload", 32)
-        return { key, payload: h.rest.subarray(NONCE_SIZE) }
+        return { fileKey: fileKey, rest: h.rest }
     }
 
     private async unwrapFileKey(stanzas: Stanza[]): Promise<Uint8Array | null> {
